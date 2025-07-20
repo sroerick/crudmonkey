@@ -1,0 +1,7 @@
+create_table("blogs") {
+	t.Column("id", "uuid", {primary: true})
+	t.Column("title", "string", {})
+	t.Column("body", "text", {})
+	t.Column("published_at", "timestamp", {})
+	t.Timestamps()
+}

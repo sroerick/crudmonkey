@@ -1,0 +1,184 @@
+package crudui
+
+import (
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+	"github.com/gobuffalo/pop/v6"
+)
+
+// FieldDescriptor holds info about a struct field for form generation
+type FieldDescriptor struct {
+	Name   string        // Go struct field name
+	DBName string        // db tag name
+	Type   reflect.Type  // Go type of the field
+}
+
+// RegisterCRUD introspects your model struct and adds CRUD pages to the TUI
+func RegisterCRUD(app *tview.Application, pages *tview.Pages, menu *tview.List, db *pop.Connection, model interface{}, resourceName string) {
+	// Derive field metadata
+	desc := describeModel(model)
+	// Add menu entry
+	menu.AddItem(strings.Title(resourceName), fmt.Sprintf("Manage %s", resourceName), 0, func() {
+		pages.SwitchToPage(resourceName)
+	})
+	// Build pages
+	  list := buildListPage(app, pages, db, model, desc, resourceName)
+  pages.AddPage(resourceName, list, true, false)
+	// New and Edit pages are generated on demand inside list page
+}
+
+
+
+func buildListPage(
+  app *tview.Application,
+  pages *tview.Pages,
+  db *pop.Connection,
+  model interface{},
+  fields []FieldDescriptor,
+  resourceName string,
+) tview.Primitive {
+  tbl := tview.NewTable()
+  // header row
+  tbl.SetCell(0, 0, tview.NewTableCell("ID").SetSelectable(false))
+  for i, f := range fields {
+    tbl.SetCell(0, i+1,
+      tview.NewTableCell(strings.Title(f.DBName)).SetSelectable(false))
+  }
+
+  // --- dynamic loading of []T ---
+  // 1. figure out the struct type T
+  t := reflect.TypeOf(model)
+  if t.Kind() == reflect.Ptr {
+    t = t.Elem()
+  }
+  // 2. make a slice type []T and a pointer to one
+  sliceType := reflect.SliceOf(t)
+  slicePtr  := reflect.New(sliceType).Interface() // *([]T)
+
+  // 3. load all records into *[]T
+  if err := db.All(slicePtr); err != nil {
+    panic(err)
+  }
+
+  // 4. reflect over the slice value
+  sliceVal := reflect.ValueOf(slicePtr).Elem()
+  for r := 0; r < sliceVal.Len(); r++ {
+    rec := sliceVal.Index(r)
+    // if rec is a *T, deref it
+    if rec.Kind() == reflect.Ptr {
+      rec = rec.Elem()
+    }
+
+    // grab the ID field by name
+    idVal := rec.FieldByName("ID")
+    idStr := fmt.Sprint(idVal.Interface())
+    tbl.SetCell(r+1, 0, tview.NewTableCell(idStr))
+
+    // now grab each of the other fields you discovered
+    for c, f := range fields {
+      fv := rec.FieldByName(f.Name)
+      tbl.SetCell(r+1, c+1,
+        tview.NewTableCell(fmt.Sprint(fv.Interface())))
+    }
+  }
+
+  // key handling…
+  tbl.SetDoneFunc(func(key tcell.Key) {
+    if key == tcell.KeyEscape {
+      pages.SwitchToPage("menu")
+    }
+  })
+  tbl.SetSelectedFunc(func(row, col int) {
+    id := tbl.GetCell(row, 0).Text
+    ed := buildFormPage(app, pages, db, fields, resourceName, id)
+    pages.AddPage(resourceName+"_edit_"+id, ed, true, true)
+  })
+
+  return tbl
+}
+// describeModel reads `db` tags and returns fields to include in forms
+func describeModel(model interface{}) []FieldDescriptor {
+	t := reflect.TypeOf(model)
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	var fields []FieldDescriptor
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		tag := f.Tag.Get("db")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		// skip primary/meta fields
+		if tag == "id" || tag == "created_at" || tag == "updated_at" {
+			continue
+		}
+		fields = append(fields, FieldDescriptor{Name: f.Name, DBName: tag, Type: f.Type})
+	}
+	return fields
+}
+
+// buildListPage creates a table view of all records
+func buildListPage(app *tview.Application, pages *tview.Pages, db *pop.Connection, fields []FieldDescriptor, resourceName string) tview.Primitive {
+	tbl := tview.NewTable()
+
+	// header
+	tbl.SetCell(0, 0, tview.NewTableCell("ID").SetSelectable(false))
+	for i, f := range fields {
+		tbl.SetCell(0, i+1, tview.NewTableCell(strings.Title(f.DBName)).SetSelectable(false))
+	}
+	// load data
+	var items []map[string]interface{}
+	db.All(&items)
+	for r, item := range items {
+		// ID cell
+		tbl.SetCell(r+1, 0, tview.NewTableCell(fmt.Sprint(item["id"]) ))
+		for c, f := range fields {
+			v := item[f.DBName]
+			tbl.SetCell(r+1, c+1, tview.NewTableCell(fmt.Sprint(v)))
+		}
+	}
+
+	// key handling: Enter to edit, N to create, D to delete, ESC to menu
+	tbl.SetDoneFunc(func(key tcell.Key) {
+		if key == tcell.KeyEscape {
+			pages.SwitchToPage("menu")
+		}
+	})
+	tbl.SetSelectedFunc(func(row, col int) {
+		id := tbl.GetCell(row, 0).Text
+		// build edit form
+		ed := buildFormPage(app, pages, db, fields, resourceName, id)
+		pages.AddPage(resourceName+"_edit_"+id, ed, true, true)
+	})
+	// you can add keyboard shortcuts for New/Delete here
+
+	return tbl
+}
+
+// buildFormPage generates a create/edit form
+func buildFormPage(app *tview.Application, pages *tview.Pages, db *pop.Connection, fields []FieldDescriptor, resourceName, id string) tview.Primitive {
+	form := tview.NewForm()
+	// input fields
+	for _, f := range fields {
+		initial := ""
+		if id != "" {
+			// load record to populate initial (omitted for brevity)
+		}
+		form.AddInputField(strings.Title(f.DBName), initial, 20, nil, nil)
+	}
+	// buttons
+	form.AddButton("Save", func() {
+		// collect values and upsert via Pop (omitted)
+		pages.SwitchToPage(resourceName)
+	})
+	form.AddButton("Cancel", func() { pages.SwitchToPage(resourceName) })
+
+	form.SetCancelFunc(func() { pages.SwitchToPage(resourceName) })
+	return form
+}
+

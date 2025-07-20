@@ -1,0 +1,11 @@
+development:
+  dialect: "sqlite3"
+  database: "db/development.sqlite"
+
+test:
+  dialect: "sqlite3"
+  database: "db/test.sqlite"
+
+production:
+  dialect: "sqlite3"
+  database: "db/production.sqlite"
